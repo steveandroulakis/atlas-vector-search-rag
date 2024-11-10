@@ -1,0 +1,6 @@
+venv/
+.mypy_cache/
+sample_files/
+.DS_Store
+__pycache__/
+scratch.md

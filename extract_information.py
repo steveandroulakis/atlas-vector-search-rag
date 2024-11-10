@@ -1,5 +1,5 @@
 from pymongo import MongoClient
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.vectorstores import MongoDBAtlasVectorSearch
 from langchain.document_loaders import DirectoryLoader
 from langchain.llms import OpenAI
@@ -8,53 +8,125 @@ import gradio as gr
 from gradio.themes.base import Base
 import key_param
 
-client = MongoClient(key_param.MONGO_URI)
+client: MongoClient = MongoClient(key_param.MONGO_URI)
 dbName = "langchain_demo"
 collectionName = "collection_of_text_blobs"
 collection = client[dbName][collectionName]
 
 # Define the text embedding model
  
-embeddings = OpenAIEmbeddings(openai_api_key=key_param.openai_api_key)
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-ada-002",  # Specify the desired model
+    # dimensions=1024  # Optional: specify dimensions if supported by the model
+)
 
 # Initialize the Vector Store
 
-vectorStore = MongoDBAtlasVectorSearch( collection, embeddings )
+vectorStore = MongoDBAtlasVectorSearch(
+    collection=collection,
+    embedding=embeddings,
+    index_name="default",
+    text_key="text",
+    embedding_key="embedding"
+)
+
+print("Vector Store Details:")
+print(f"Collection name: {vectorStore._collection.full_name}")
+print(f"Index name: {vectorStore._index_name}")
+print(f"Text key: {vectorStore._text_key}")
+print(f"Embedding key: {vectorStore._embedding_key}")
 
 def query_data(query):
-    # Convert question to vector using OpenAI embeddings
-    # Perform Atlas Vector Search using Langchain's vectorStore
-    # similarity_search returns MongoDB documents most similar to the query    
-
-    docs = vectorStore.similarity_search(query, K=1)
-    as_output = docs[0].page_content
-
-    # Leveraging Atlas Vector Search paired with Langchain's QARetriever
-
-    # Define the LLM that we want to use -- note that this is the Language Generation Model and NOT an Embedding Model
-    # If it's not specified (for example like in the code below),
-    # then the default OpenAI model used in LangChain is OpenAI GPT-3.5-turbo, as of August 30, 2023
+    print(f"\nSearching for: {query}")
     
-    llm = OpenAI(openai_api_key=key_param.openai_api_key, temperature=0)
-
-
-    # Get VectorStoreRetriever: Specifically, Retriever for MongoDB VectorStore.
-    # Implements _get_relevant_documents which retrieves documents relevant to a query.
-    retriever = vectorStore.as_retriever()
-
-    # Load "stuff" documents chain. Stuff documents chain takes a list of documents,
-    # inserts them all into a prompt and passes that prompt to an LLM.
-
-    qa = RetrievalQA.from_chain_type(llm, chain_type="stuff", retriever=retriever)
-
-    # Execute the chain
-
-    retriever_output = qa.run(query)
-
-    # Return Atlas Vector Search output, and output generated using RAG Architecture
-    return as_output, retriever_output
+    # First, try the similarity search and print results
+    docs = vectorStore.similarity_search(query, K=10)  # Increased K to see more results
+    print(f"Number of similarity search results: {len(docs)}")
+    
+    if len(docs) == 0:
+        print("No documents found in similarity search!")
+        return "No similar documents found", "No RAG output generated"
+    
+    # Print found documents for debugging
+    for i, doc in enumerate(docs):
+        print(f"\nSimilar Document {i+1}:")
+        print(f"Content: {doc.page_content[:200]}...")  # Print first 200 chars
+        print(f"Metadata: {doc.metadata}")
+    
+    as_output = docs[0].page_content
+    
+    try:
+        # Set up LLM
+        llm = OpenAI(openai_api_key=key_param.openai_api_key, temperature=0)
+        
+        # Get retriever
+        retriever = vectorStore.as_retriever()
+        
+        # Set up QA chain
+        qa = RetrievalQA.from_chain_type(llm, chain_type="stuff", retriever=retriever)
+        
+        # Execute the chain
+        print("\nExecuting RAG chain...")
+        retriever_output = qa.run(query)
+        print(f"RAG Output generated: {retriever_output[:200]}...")  # Print first 200 chars
+        
+        return as_output, retriever_output
+        
+    except Exception as e:
+        print(f"Error in RAG processing: {str(e)}")
+        return as_output, f"Error in RAG processing: {str(e)}"
 
 # Create a web interface for the app, using Gradio
+
+def test_vector_search():
+    # Get a real embedding to test with
+    test_text = "team"
+    test_embedding = embeddings.embed_query(test_text)
+    print(f"Test embedding length: {len(test_embedding)}")
+    
+    # Try direct MongoDB search with actual embedding
+    pipeline = [
+        {
+            "$search": {
+                "index": "default",
+                "knnBeta": {
+                    "vector": test_embedding,
+                    "path": "embedding",
+                    "k": 5
+                }
+            }
+        }
+    ]
+    
+    try:
+        results = list(collection.aggregate(pipeline))
+        print(f"\nDirect vector search results: {len(results)}")
+        if results:
+            for r in results:
+                print(f"Found: {r.get('text')}")
+    except Exception as e:
+        print(f"Search error: {str(e)}")
+        
+    # Check index details
+    try:
+        indexes = collection.list_indexes()
+        print("\nCollection indexes:")
+        for idx in indexes:
+            print(f"Index: {idx}")
+    except Exception as e:
+        print(f"Index listing error: {str(e)}")
+
+def verify_embeddings():
+    sample_docs = collection.find().limit(3)
+    for doc in sample_docs:
+        emb = doc.get('embedding', [])
+        print(f"\nDocument ID: {doc['_id']}")
+        print(f"Embedding length: {len(emb)}")
+        print(f"First few values: {emb[:5]}")
+        print(f"Are all values float?: {all(isinstance(x, float) for x in emb)}")
+
+test_vector_search()
+verify_embeddings()
 
 with gr.Blocks(theme=Base(), title="Question Answering App using Vector Search + RAG") as demo:
     gr.Markdown(
